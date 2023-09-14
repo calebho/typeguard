@@ -4,11 +4,12 @@ import ast
 import inspect
 import sys
 from collections.abc import Sequence
-from functools import partial
 from inspect import isclass, isfunction
 from types import CodeType, FrameType, FunctionType
 from typing import TYPE_CHECKING, Any, Callable, ForwardRef, TypeVar, cast, overload
 from warnings import warn
+
+from typing_extensions import ParamSpec
 
 from ._config import CollectionCheckStrategy, ForwardRefPolicy, global_config
 from ._exceptions import InstrumentationWarning
@@ -126,6 +127,10 @@ def instrument(f: T_CallableOrType) -> FunctionType | str:
     return new_function
 
 
+_P = ParamSpec("_P")
+_R = TypeVar("_R")
+
+
 @overload
 def typechecked(
     *,
@@ -133,23 +138,35 @@ def typechecked(
     typecheck_fail_callback: TypeCheckFailCallback | Unset = unset,
     collection_check_strategy: CollectionCheckStrategy | Unset = unset,
     debug_instrumentation: bool | Unset = unset,
-) -> Callable[[T_CallableOrType], T_CallableOrType]:
+) -> Callable[[Callable[_P, _R]], Callable[_P, _R]]:
     ...
 
 
 @overload
-def typechecked(target: T_CallableOrType) -> T_CallableOrType:
+def typechecked(target: Callable[_P, _R]) -> Callable[_P, _R]:
     ...
 
 
+@overload
 def typechecked(
-    target: T_CallableOrType | None = None,
+    target: Callable[_P, _R],
     *,
     forward_ref_policy: ForwardRefPolicy | Unset = unset,
     typecheck_fail_callback: TypeCheckFailCallback | Unset = unset,
     collection_check_strategy: CollectionCheckStrategy | Unset = unset,
     debug_instrumentation: bool | Unset = unset,
-) -> Any:
+) -> Callable[_P, _R]:
+    ...
+
+
+def typechecked(
+    target: Callable[_P, _R] | None = None,
+    *,
+    forward_ref_policy: ForwardRefPolicy | Unset = unset,
+    typecheck_fail_callback: TypeCheckFailCallback | Unset = unset,
+    collection_check_strategy: CollectionCheckStrategy | Unset = unset,
+    debug_instrumentation: bool | Unset = unset,
+) -> Callable[[Callable[_P, _R]], Callable[_P, _R]] | Callable[_P, _R]:
     """
     Instrument the target function to perform run-time type checking.
 
@@ -178,13 +195,17 @@ def typechecked(
 
     """
     if target is None:
-        return partial(
-            typechecked,
-            forward_ref_policy=forward_ref_policy,
-            typecheck_fail_callback=typecheck_fail_callback,
-            collection_check_strategy=collection_check_strategy,
-            debug_instrumentation=debug_instrumentation,
-        )
+
+        def decorator(f: Callable[_P, _R]) -> Callable[_P, _R]:
+            return typechecked(
+                f,
+                forward_ref_policy=forward_ref_policy,
+                typecheck_fail_callback=typecheck_fail_callback,
+                collection_check_strategy=collection_check_strategy,
+                debug_instrumentation=debug_instrumentation,
+            )
+
+        return decorator
 
     if not __debug__:
         return target
@@ -215,8 +236,8 @@ def typechecked(
         return target
 
     # Find either the first Python wrapper or the actual function
-    wrapper_class: type[classmethod[Any, Any, Any]] | type[
-        staticmethod[Any, Any]
+    wrapper_class: type[classmethod[Any, _P, _R]] | type[
+        staticmethod[_P, _R]
     ] | None = None
     if isinstance(target, (classmethod, staticmethod)):
         wrapper_class = target.__class__
@@ -234,4 +255,5 @@ def typechecked(
     if wrapper_class is None:
         return retval
     else:
-        return wrapper_class(retval)
+        # SAFETY: `classmethod[*, P, R]` and `staticmethod[P, R]` are `Callable[P, R]`
+        return cast(Callable[_P, _R], wrapper_class(retval))
